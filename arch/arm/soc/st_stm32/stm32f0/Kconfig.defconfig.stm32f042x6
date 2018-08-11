@@ -1,0 +1,21 @@
+# Kconfig - ST Microelectronics STM32F042X6 MCU
+#
+# Copyright (c) 2017 BayLibre, SAS
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+if SOC_STM32F042X6
+
+config SOC
+	string
+	default "stm32f042x6"
+
+config NUM_IRQS
+	int
+	default 32
+
+config GPIO_STM32_PORTD
+	default n
+
+endif # SOC_STM32F042X6
