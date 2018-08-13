@@ -778,11 +778,20 @@ int usb_dc_ep_mps(const u8_t ep)
 
 void HAL_PCD_ResetCallback(PCD_HandleTypeDef *hpcd)
 {
+	int i;
+
 	SYS_LOG_DBG("");
 
 	HAL_PCD_EP_Open(&usb_dc_stm32_state.pcd, EP0_IN, EP0_MPS, EP_TYPE_CTRL);
 	HAL_PCD_EP_Open(&usb_dc_stm32_state.pcd, EP0_OUT, EP0_MPS,
 			EP_TYPE_CTRL);
+
+	/* The DataInCallback will never be called at this point for any pending
+	 * transactions. Reset the IN semaphores to prevent perpetual locked state.
+	 * */
+	for (i = 0; i < CONFIG_USB_NUM_BIDIR_ENDPOINTS; i++) {
+		k_sem_give(&usb_dc_stm32_state.in_ep_state[i].write_sem);
+	}
 
 	if (usb_dc_stm32_state.status_cb) {
 		usb_dc_stm32_state.status_cb(USB_DC_RESET, NULL);
