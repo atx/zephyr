@@ -178,7 +178,7 @@ static const u32_t table_samp_time[] = {
 #endif
 
 /* 16 external channels. */
-#define STM32_CHANNEL_COUNT		16
+#define STM32_CHANNEL_COUNT		18
 
 struct adc_stm32_data {
 	struct adc_context ctx;
@@ -578,6 +578,11 @@ static int adc_stm32_init(struct device *dev)
 	 * These two series STM32 has one internal voltage reference source
 	 * to be enabled.
 	 */
+	LL_ADC_SetCommonPathInternalCh(__LL_ADC_COMMON_INSTANCE(adc),
+				      LL_ADC_PATH_INTERNAL_VREFINT);
+#endif
+
+#if defined(CONFIG_SOC_SERIES_STM32F4X)
 	LL_ADC_SetCommonPathInternalCh(__LL_ADC_COMMON_INSTANCE(adc),
 				      LL_ADC_PATH_INTERNAL_VREFINT);
 #endif
