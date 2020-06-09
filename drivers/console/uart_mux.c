@@ -814,8 +814,8 @@ void uart_mux_foreach(uart_mux_cb_t cb, void *user_data)
 	};
 
 #define DEFINE_UART_MUX_DEV_DATA(x, _)					  \
-	RING_BUF_DECLARE(tx_ringbuf_##x, CONFIG_UART_MUX_RINGBUF_SIZE);	  \
-	RING_BUF_DECLARE(rx_ringbuf_##x, CONFIG_UART_MUX_RINGBUF_SIZE);	  \
+	RING_BUF_DECLARE(uart_mux_tx_ringbuf_##x, CONFIG_UART_MUX_RINGBUF_SIZE);	  \
+	RING_BUF_DECLARE(uart_mux_rx_ringbuf_##x, CONFIG_UART_MUX_RINGBUF_SIZE);	  \
 	static struct uart_mux_dev_data uart_mux_dev_data_##x = {	  \
 		.tx_ringbuf = &tx_ringbuf_##x,				  \
 		.rx_ringbuf = &rx_ringbuf_##x,				  \

@@ -1052,15 +1052,15 @@ static const struct uart_driver_api cdc_acm_driver_api = {
 #endif /* (CONFIG_USB_COMPOSITE_DEVICE || CONFIG_CDC_ACM_IAD) */
 
 #define DEFINE_CDC_ACM_DEV_DATA(x, _)					\
-	RING_BUF_DECLARE(rx_ringbuf_##x,				\
+	RING_BUF_DECLARE(acm_rx_ringbuf_##x,				\
 			 CONFIG_USB_CDC_ACM_RINGBUF_SIZE);		\
-	RING_BUF_DECLARE(tx_ringbuf_##x,				\
+	RING_BUF_DECLARE(acm_tx_ringbuf_##x,				\
 			 CONFIG_USB_CDC_ACM_RINGBUF_SIZE);		\
 	static struct cdc_acm_dev_data_t cdc_acm_dev_data_##x = {	\
 		.usb_status = USB_DC_UNKNOWN,				\
 		.line_coding = CDC_ACM_DEFAULT_BAUDRATE,		\
-		.rx_ringbuf = &rx_ringbuf_##x,				\
-		.tx_ringbuf = &tx_ringbuf_##x,				\
+		.rx_ringbuf = &acm_rx_ringbuf_##x,				\
+		.tx_ringbuf = &acm_tx_ringbuf_##x,				\
 	};
 
 #define DEFINE_CDC_ACM_DEVICE(x, _)					\
