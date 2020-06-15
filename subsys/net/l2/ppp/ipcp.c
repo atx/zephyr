@@ -481,13 +481,28 @@ static void ipcp_down(struct ppp_fsm *fsm)
 {
 	struct ppp_context *ctx = CONTAINER_OF(fsm, struct ppp_context,
 					       ipcp.fsm);
+	struct net_if_ipv4 *ipv4;
+	struct net_if_addr *unicast;
+	int i;
 
 	if (!ctx->is_network_up) {
 		return;
 	}
 
+	ipv4 = ctx->iface->config.ip.ipv4;
+	for (i = 0; ipv4 && i < NET_IF_MAX_IPV4_ADDR; i++) {
+		unicast = &ipv4->unicast[i];
+		if (!unicast->is_used) {
+			continue;
+		}
+
+		net_if_ipv4_addr_rm(ctx->iface, &unicast->address.in_addr);
+	}
+
 	ctx->is_network_up = false;
 	ctx->is_ipcp_up = false;
+
+	memset(&ctx->ipcp.my_options, 0, sizeof(ctx->ipcp.my_options));
 
 	ppp_network_down(ctx, PPP_IP);
 }

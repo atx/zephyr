@@ -864,6 +864,7 @@ static int ppp_stop(struct device *dev)
 	struct ppp_driver_context *context = dev->driver_data;
 
 	net_ppp_carrier_off(context->iface);
+	atomic_set(&context->modem_init_done, false);
 
 	return 0;
 }
