@@ -55,6 +55,7 @@ static struct gsm_modem {
 
 	u8_t *ppp_recv_buf;
 	size_t ppp_recv_buf_len;
+	struct net_if *ppp_iface;
 
 	enum setup_state state;
 	struct device *ppp_dev;
@@ -71,6 +72,14 @@ NET_BUF_POOL_DEFINE(gsm_recv_pool, GSM_RECV_MAX_BUF, GSM_RECV_BUF_SIZE,
 K_THREAD_STACK_DEFINE(gsm_rx_stack, GSM_RX_STACK_SIZE);
 
 struct k_thread gsm_rx_thread;
+
+K_THREAD_STACK_DEFINE(gsm_wq_stack, GSM_RX_STACK_SIZE);
+static struct k_work_q gsm_wq;
+
+static int gsm_submit_to_queue(struct k_delayed_work *work, k_timeout_t delay)
+{
+	return k_delayed_work_submit_to_queue(&gsm_wq, work, delay);
+}
 
 static void gsm_rx(struct gsm_modem *gsm)
 {
@@ -243,16 +252,18 @@ static int gsm_setup_mccmno(struct gsm_modem *gsm)
 
 static void set_ppp_carrier_on(struct gsm_modem *gsm)
 {
-	struct device *ppp_dev = device_get_binding(CONFIG_NET_PPP_DRV_NAME);
-	const struct ppp_api *api =
-				(const struct ppp_api *)ppp_dev->driver_api;
-
-	if (!ppp_dev) {
-		LOG_ERR("Cannot find PPP %s!", "device");
+	if (!gsm->ppp_iface) {
 		return;
 	}
+	net_if_up(gsm->ppp_iface);
+}
 
-	api->start(ppp_dev);
+static void set_ppp_carrier_off(struct gsm_modem *gsm)
+{
+	if (!gsm->ppp_iface) {
+		return;
+	}
+	net_if_down(gsm->ppp_iface);
 }
 
 static void gsm_finalize_connection(struct gsm_modem *gsm)
@@ -269,8 +280,7 @@ static void gsm_finalize_connection(struct gsm_modem *gsm)
 		if (ret < 0) {
 			LOG_DBG("modem setup returned %d, %s",
 				ret, "retrying...");
-			(void)k_delayed_work_submit(&gsm->gsm_configure_work,
-						    K_SECONDS(1));
+			(void)gsm_submit_to_queue(&gsm->gsm_configure_work, K_SECONDS(1));
 			return;
 		}
 	}
@@ -286,12 +296,12 @@ static void gsm_finalize_connection(struct gsm_modem *gsm)
 	if (ret < 0) {
 		LOG_DBG("modem setup returned %d, %s",
 			ret, "retrying...");
-		(void)k_delayed_work_submit(&gsm->gsm_configure_work,
-					    K_SECONDS(1));
+		(void)gsm_submit_to_queue(&gsm->gsm_configure_work, K_SECONDS(1));
 		return;
 	}
 
 	LOG_DBG("modem setup returned %d, %s", ret, "enable PPP");
+	k_msleep(5000);
 
 	ret = modem_cmd_handler_setup_cmds(&gsm->context.iface,
 					   &gsm->context.cmd_handler,
@@ -302,19 +312,11 @@ static void gsm_finalize_connection(struct gsm_modem *gsm)
 	if (ret < 0) {
 		LOG_DBG("modem setup returned %d, %s",
 			ret, "retrying...");
-		(void)k_delayed_work_submit(&gsm->gsm_configure_work,
-					    K_SECONDS(1));
+		(void)gsm_submit_to_queue(&gsm->gsm_configure_work, K_SECONDS(1));
 		return;
 	}
 
 	gsm->setup_done = true;
-
-	/* If we are not muxing, the modem interface and gsm_rx() thread is not
-	 * needed as PPP will handle the incoming traffic internally.
-	 */
-	if (!IS_ENABLED(CONFIG_GSM_MUX)) {
-		k_thread_abort(&gsm_rx_thread);
-	}
 
 	set_ppp_carrier_on(gsm);
 
@@ -389,7 +391,7 @@ static int mux_enable(struct gsm_modem *gsm)
 
 static void mux_setup_next(struct gsm_modem *gsm)
 {
-	(void)k_delayed_work_submit(&gsm->gsm_configure_work, K_MSEC(1));
+	(void)gsm_submit_to_queue(&gsm->gsm_configure_work, K_MSEC(1));
 }
 
 static void mux_attach_cb(struct device *mux, int dlci_address,
@@ -524,7 +526,7 @@ static void gsm_configure(struct k_work *work)
 	if (ret < 0) {
 		LOG_DBG("modem not ready %d", ret);
 
-		(void)k_delayed_work_submit(&gsm->gsm_configure_work, 0);
+		(void)gsm_submit_to_queue(&gsm->gsm_configure_work, 0);
 
 		return;
 	}
@@ -549,13 +551,50 @@ static void gsm_configure(struct k_work *work)
 			k_delayed_work_init(&gsm->gsm_configure_work,
 					    mux_setup);
 
-			(void)k_delayed_work_submit(&gsm->gsm_configure_work,
-						    0);
+			(void)gsm_submit_to_queue(&gsm->gsm_configure_work, 0);
 			return;
 		}
 	}
 
 	gsm_finalize_connection(gsm);
+}
+
+static void gsm_stop_do(struct k_work *work)
+{
+	struct gsm_modem *gsm = CONTAINER_OF(work, struct gsm_modem,
+						gsm_configure_work);
+	set_ppp_carrier_off(gsm);
+
+	gsm->setup_done = false;
+}
+
+static int gsm_start(struct gsm_modem *gsm)
+{
+	LOG_DBG("Starting GSM modem (%p)", gsm);
+	// This steals ISRs back from the PPP stack
+	modem_iface_uart_init_dev(&gsm->context.iface, CONFIG_MODEM_GSM_UART_NAME);
+
+	gsm->state = STATE_INIT;
+	gsm->setup_done = false;
+	k_delayed_work_init(&gsm->gsm_configure_work, gsm_configure);
+	(void)gsm_submit_to_queue(&gsm->gsm_configure_work, K_NO_WAIT);
+	return 0;
+}
+
+static int gsm_stop(struct gsm_modem *gsm)
+{
+	LOG_DBG("Stopping GSM modem (%p)", gsm);
+	k_delayed_work_init(&gsm->gsm_configure_work, gsm_stop_do);
+	(void)gsm_submit_to_queue(&gsm->gsm_configure_work, K_NO_WAIT);
+	return 0;
+}
+
+static void iface_cb(struct net_if *iface, void *user_data)
+{
+	struct gsm_modem *gsm = (struct gsm_modem *)user_data;
+	if (net_if_get_device(iface) == device_get_binding(CONFIG_NET_PPP_DRV_NAME)) {
+		gsm->ppp_iface = iface;
+	}
 }
 
 static int gsm_init(struct device *device)
@@ -574,6 +613,11 @@ static int gsm_init(struct device *device)
 	gsm->cmd_handler_data.buf_pool = &gsm_recv_pool;
 	gsm->cmd_handler_data.alloc_timeout = GSM_BUF_ALLOC_TIMEOUT;
 	gsm->cmd_handler_data.eol = "\r";
+
+	net_if_foreach(iface_cb, gsm);
+	if (!gsm->ppp_iface) {
+		LOG_ERR("Cannot find the PPP interface!");
+	}
 
 	k_sem_init(&gsm->sem_response, 0, 1);
 
@@ -619,12 +663,41 @@ static int gsm_init(struct device *device)
 			gsm, NULL, NULL, K_PRIO_COOP(7), 0, K_NO_WAIT);
 	k_thread_name_set(&gsm_rx_thread, "gsm_rx");
 
-	k_delayed_work_init(&gsm->gsm_configure_work, gsm_configure);
+	k_work_q_start(&gsm_wq, gsm_wq_stack, K_THREAD_STACK_SIZEOF(gsm_wq_stack),
+			K_PRIO_COOP(6));
 
-	(void)k_delayed_work_submit(&gsm->gsm_configure_work, K_NO_WAIT);
+#ifndef CONFIG_DEVICE_POWER_MANAGEMENT
+	gsm_start(gsm);
+#endif
 
 	return 0;
 }
 
-DEVICE_INIT(gsm_ppp, "modem_gsm", gsm_init, &gsm, NULL, POST_KERNEL,
-	    CONFIG_MODEM_GSM_INIT_PRIORITY);
+static int gsm_pm_control(struct device *device, u32_t ctrl_command,
+						  void *device_power_state, device_pm_cb cb,
+						  void *arg)
+{
+	struct gsm_modem *gsm = device->driver_data;
+	switch (ctrl_command) {
+	case DEVICE_PM_GET_POWER_STATE:
+		break;
+	case DEVICE_PM_SET_POWER_STATE: {
+		u32_t power_state = *((u32_t *)device_power_state);
+		switch (power_state) {
+		case DEVICE_PM_ACTIVE_STATE:
+			gsm_start(gsm);
+			break;
+		case DEVICE_PM_OFF_STATE:
+			gsm_stop(gsm);
+			break;
+		default:
+			return -ENOTSUP;
+		}
+		break;
+	}
+	}
+	return 0;
+}
+
+DEVICE_DEFINE(gsm_ppp, "modem_gsm", gsm_init, gsm_pm_control, &gsm, NULL, POST_KERNEL,
+	    CONFIG_MODEM_GSM_INIT_PRIORITY, NULL);
