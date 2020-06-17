@@ -52,6 +52,7 @@ const char *sensor_channel_name[SENSOR_CHAN_ALL] = {
 	[SENSOR_CHAN_VOLTAGE] =		"voltage",
 	[SENSOR_CHAN_CURRENT] =		"current",
 	[SENSOR_CHAN_ROTATION] =	"rotation",
+	[SENSOR_CHAN_GAUGE_STATE_OF_CHARGE] = "gauge_state_of_charge",
 };
 
 static int handle_channel_by_name(const struct shell *shell, struct device *dev,
