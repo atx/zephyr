@@ -176,6 +176,7 @@ struct cdc_acm_dev_data_t {
 	void *cb_data;
 	struct k_work cb_work;
 	struct k_work tx_work;
+	struct k_work rx_work;
 	/* Tx ready status. Signals when */
 	bool tx_ready;
 	bool rx_ready;				/* Rx ready status */
@@ -324,34 +325,65 @@ static void tx_work_handler(struct k_work *work)
 	ring_buf_get_finish(dev_data->tx_ringbuf, len);
 }
 
-static void cdc_acm_read_cb(u8_t ep, int size, void *priv)
+static void rx_work_handler(struct k_work *work)
 {
-	struct cdc_acm_dev_data_t *dev_data = priv;
-	size_t wrote;
+	struct cdc_acm_dev_data_t *dev_data =
+		CONTAINER_OF(work, struct cdc_acm_dev_data_t, rx_work);
+	struct device *dev = dev_data->common.dev;
+	struct usb_cfg_data *cfg = (void *)dev->config->config_info;
+	u8_t ep = cfg->endpoint[ACM_OUT_EP_IDX].ep_addr;
+	u32_t read_avail = 0;
+	u32_t read_bytes = 0;
+	u32_t buf_bytes;
+	u8_t *buf;
 
-	LOG_DBG("ep %x size %d dev_data %p rx_ringbuf space %u",
-		ep, size, dev_data, ring_buf_space_get(dev_data->rx_ringbuf));
-
-	if (size <= 0) {
+	usb_ep_read_wait(ep, NULL, 0, &read_avail);
+	if (read_avail == 0) {
+		/* Initializing or ZLP, signal the host to continue */
 		goto done;
 	}
 
-	wrote = ring_buf_put(dev_data->rx_ringbuf, dev_data->rx_buf, size);
-	if (wrote < size) {
-		LOG_ERR("Ring buffer full, drop %d bytes", size - wrote);
+	buf_bytes = ring_buf_put_claim(dev_data->rx_ringbuf, &buf, read_avail);
+	if (buf_bytes == 0) {
+		LOG_DBG("The rx ring buffer is full!");
+		goto done;
 	}
+
+	usb_ep_read_wait(ep, buf, buf_bytes, &read_bytes);
+	ring_buf_put_finish(dev_data->rx_ringbuf, read_bytes);
 
 done:
-	dev_data->rx_ready = true;
-
-	/* Call callback only if rx irq ena */
-	if (dev_data->cb && dev_data->rx_irq_ena) {
-		k_work_submit(&dev_data->cb_work);
+	if (read_bytes == read_avail) {
+		/* Signal the endpoint to continue. Otherwise we signal it
+		 * in uart_fifo_read
+		 * */
+		usb_dc_ep_read_continue(ep);
 	}
 
-	usb_transfer(ep, dev_data->rx_buf, sizeof(dev_data->rx_buf),
-		     USB_TRANS_READ, cdc_acm_read_cb, dev_data);
+	if (!ring_buf_is_empty(dev_data->rx_ringbuf)) {
+		dev_data->rx_ready = true;
+		if (dev_data->cb && dev_data->rx_irq_ena) {
+			k_work_submit(&dev_data->cb_work);
+		}
+	}
+}
 
+static void cdc_acm_bulk_out(u8_t ep, enum usb_dc_ep_cb_status_code ep_status)
+{
+	struct cdc_acm_dev_data_t *dev_data;
+	struct usb_dev_data *common;
+
+	ARG_UNUSED(ep_status);
+
+	common = usb_get_dev_data_by_ep(&cdc_acm_data_devlist, ep);
+	if (common == NULL) {
+		LOG_WRN("Device data not found for endpoint %u", ep);
+		return;
+	}
+
+	dev_data = CONTAINER_OF(common, struct cdc_acm_dev_data_t, common);
+
+	k_work_submit(&dev_data->rx_work);
 }
 
 /**
@@ -399,9 +431,6 @@ static void cdc_acm_do_cb(struct cdc_acm_dev_data_t *dev_data,
 			  enum usb_dc_status_code status,
 			  const u8_t *param)
 {
-	struct device *dev = dev_data->common.dev;
-	struct usb_cfg_data *cfg = (void *)dev->config->config_info;
-
 	/* Store the new status */
 	if (!(status == USB_DC_SOF || status == USB_DC_INTERFACE)) {
 		dev_data->usb_status = status;
@@ -420,8 +449,7 @@ static void cdc_acm_do_cb(struct cdc_acm_dev_data_t *dev_data,
 		LOG_DBG("USB device connected");
 		break;
 	case USB_DC_CONFIGURED:
-		cdc_acm_read_cb(cfg->endpoint[ACM_OUT_EP_IDX].ep_addr, 0,
-				dev_data);
+		k_work_submit(&dev_data->rx_work);
 		dev_data->tx_ready = true;
 		dev_data->tx_irq_ena = true;
 		dev_data->rx_irq_ena = true;
@@ -527,6 +555,7 @@ static int cdc_acm_init(struct device *dev)
 	k_sem_init(&poll_wait_sem, 0, UINT_MAX);
 	k_work_init(&dev_data->cb_work, cdc_acm_irq_callback_work_handler);
 	k_work_init(&dev_data->tx_work, tx_work_handler);
+	k_work_init(&dev_data->rx_work, rx_work_handler);
 
 	return ret;
 }
@@ -589,6 +618,10 @@ static int cdc_acm_fifo_read(struct device *dev, u8_t *rx_data, const int size)
 	if (ring_buf_is_empty(dev_data->rx_ringbuf)) {
 		dev_data->rx_ready = false;
 	}
+
+	/* Some readers might read byte-by-byte. Not sure if it is a good idea
+	 * to call this every time... */
+	k_work_submit(&dev_data->rx_work);
 
 	return len;
 }
@@ -979,7 +1012,7 @@ static const struct uart_driver_api cdc_acm_driver_api = {
 #define DEFINE_CDC_ACM_EP(x, int_ep_addr, out_ep_addr, in_ep_addr)	\
 	static struct usb_ep_cfg_data cdc_acm_ep_data_##x[] = {		\
 		INITIALIZER_EP_DATA(cdc_acm_int_in, int_ep_addr),	\
-		INITIALIZER_EP_DATA(usb_transfer_ep_callback,		\
+		INITIALIZER_EP_DATA(cdc_acm_bulk_out,		\
 				    out_ep_addr),			\
 		INITIALIZER_EP_DATA(usb_transfer_ep_callback,		\
 				    in_ep_addr),			\
