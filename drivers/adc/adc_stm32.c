@@ -191,6 +191,9 @@ struct adc_stm32_data {
 #if defined(CONFIG_SOC_SERIES_STM32F0X) || defined(CONFIG_SOC_SERIES_STM32L0X)
 	s8_t acq_time_index;
 #endif
+#ifdef CONFIG_DEVICE_POWER_MANAGEMENT
+	u32_t pm_state;
+#endif
 };
 
 struct adc_stm32_cfg {
@@ -641,10 +644,54 @@ static int adc_stm32_init(struct device *dev)
 	LL_ADC_StartCalibration(adc);
 	LL_ADC_REG_SetTriggerSource(adc, LL_ADC_REG_TRIG_SOFTWARE);
 #endif
+
+#ifdef CONFIG_DEVICE_POWER_MANAGEMENT
+	data->pm_state = DEVICE_PM_ACTIVE_STATE;
+#endif
+
 	adc_context_unlock_unconditionally(&data->ctx);
 
 	return 0;
 }
+
+#ifdef CONFIG_DEVICE_POWER_MANAGEMENT
+
+static void adc_stm32_set_power_state(struct device *dev, u32_t new_state)
+{
+	const struct adc_stm32_cfg *config = dev->config->config_info;
+	ADC_TypeDef *adc = (ADC_TypeDef *)config->base;
+
+	if (new_state == DEVICE_PM_ACTIVE_STATE) {
+		LL_ADC_Enable(adc);
+	} else {
+		LL_ADC_Disable(adc);
+	}
+}
+
+static int adc_stm32_pm_control(struct device *dev, u32_t ctrl_command,
+								void *context, device_pm_cb cb, void *arg)
+{
+	struct adc_stm32_data *data = dev->driver_data;
+	if (ctrl_command == DEVICE_PM_SET_POWER_STATE) {
+		u32_t new_state = *((const u32_t *)context);
+		if (new_state != data->pm_state) {
+			adc_stm32_set_power_state(dev, new_state);
+			data->pm_state = new_state;
+		}
+	} else if (ctrl_command == DEVICE_PM_GET_POWER_STATE) {
+		*((u32_t *)context) = data->pm_state;
+	} else {
+		return -ENOTSUP;
+	}
+
+	if (cb) {
+		cb(dev, 0, context, arg);
+	}
+
+	return 0;
+}
+
+#endif
 
 static const struct adc_driver_api api_stm32_driver_api = {
 	.channel_setup = adc_stm32_channel_setup,
@@ -672,8 +719,8 @@ static struct adc_stm32_data adc_stm32_data_##index = {			\
 	ADC_CONTEXT_INIT_SYNC(adc_stm32_data_##index, ctx),		\
 };									\
 									\
-DEVICE_AND_API_INIT(adc_##index, DT_INST_LABEL(index),	\
-		    &adc_stm32_init,					\
+DEVICE_DEFINE(adc_##index, DT_INST_LABEL(index),	\
+		    &adc_stm32_init, &adc_stm32_pm_control,				\
 		    &adc_stm32_data_##index, &adc_stm32_cfg_##index,	\
 		    POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,	\
 		    &api_stm32_driver_api);				\
