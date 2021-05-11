@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <kernel.h>
 #define LOG_LEVEL CONFIG_USB_DEVICE_NETWORK_LOG_LEVEL
 #include <logging/log.h>
 LOG_MODULE_REGISTER(usb_eem);
@@ -24,6 +25,8 @@ static u8_t sentinel[] = { 0xde, 0xad, 0xbe, 0xef };
 			sizeof(u16_t)) /* EEM header */
 
 static u8_t tx_buf[EEM_FRAME_SIZE], rx_buf[EEM_FRAME_SIZE];
+static int rx_buf_size = 0;
+static struct k_work rx_work;
 
 struct usb_cdc_eem_config {
 	struct usb_if_descriptor if0;
@@ -99,6 +102,9 @@ static inline u16_t eem_pkt_size(u16_t hdr)
 	}
 }
 
+K_THREAD_STACK_DEFINE(eem_workq_stack, 512);
+static struct k_work_q eem_workq;
+
 static int eem_send(struct net_pkt *pkt)
 {
 	u16_t *hdr = (u16_t *)&tx_buf[0];
@@ -142,6 +148,20 @@ static int eem_send(struct net_pkt *pkt)
 
 static void eem_read_cb(u8_t ep, int size, void *priv)
 {
+	/* Maybe attempt to prevent concurrent access here? */
+	rx_buf_size = size;
+	k_work_submit_to_queue(&eem_workq, &rx_work);
+
+	return;
+
+
+	usb_transfer(eem_ep_data[EEM_OUT_EP_IDX].ep_addr, rx_buf,
+		     sizeof(rx_buf), USB_TRANS_READ, eem_read_cb, NULL);
+}
+
+static void eem_rx_work_handler(struct k_work *work)
+{
+	int size = rx_buf_size;
 	u8_t *ptr = rx_buf;
 
 	do {
@@ -177,7 +197,8 @@ static void eem_read_cb(u8_t ep, int size, void *priv)
 			break;
 		}
 
-		pkt = net_pkt_alloc_with_buffer(netusb_net_iface(),
+		/* This can block forever */
+		pkt = net_pkt_rx_alloc_with_buffer(netusb_net_iface(),
 						eem_size - sizeof(sentinel),
 						AF_UNSPEC, 0, K_FOREVER);
 		if (!pkt) {
@@ -231,6 +252,10 @@ static inline void eem_status_interface(const u8_t *desc)
 	if (iface_num != eem_get_first_iface_number()) {
 		return;
 	}
+
+	k_work_init(&rx_work, eem_rx_work_handler);
+	k_work_q_start(&eem_workq, eem_workq_stack,
+				   K_THREAD_STACK_SIZEOF(eem_workq_stack), K_PRIO_COOP(3));
 
 	netusb_enable(&eem_function);
 }
