@@ -139,6 +139,7 @@
 	{
 		_net_buf_pool_list = .;
 		KEEP(*(SORT_BY_NAME("._net_buf_pool.static.*")))
+		_net_buf_pool_list_end = .;
 	} GROUP_DATA_LINK_IN(RAMABLE_REGION, ROMABLE_REGION)
 
 	SECTION_DATA_PROLOGUE(net_if,,SUBALIGN(4))
